@@ -1,70 +1,92 @@
-"""Minimal CLI entry-point for cronwrap."""
+"""Command-line interface for cronwrap."""
 
 import argparse
 import sys
-from typing import List, Optional
 
-from cronwrap.timeout import TimeoutConfig
-from cronwrap.retry import RetryPolicy
-from cronwrap.core import CronJob
+from cronwrap.lock import JobLock, LockAcquisitionError, LockConfig
 
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="cronwrap",
-        description="Wrap a shell command with logging, retries, and timeouts.",
+        description="Lightweight wrapper for cron jobs with logging, alerting, and retry logic.",
     )
-    parser.add_argument("command", nargs=argparse.REMAINDER, help="Command to run")
+    parser.add_argument("job_name", help="Unique name for the cron job")
+    parser.add_argument("command", nargs=argparse.REMAINDER, help="Command to execute")
     parser.add_argument(
         "--timeout", type=int, default=0, metavar="SECONDS",
-        help="Kill job after N seconds (0 = disabled)",
+        help="Kill job after SECONDS (0 = disabled)",
     )
     parser.add_argument(
         "--retries", type=int, default=0, metavar="N",
-        help="Retry failed jobs up to N times",
+        help="Number of retry attempts on failure",
     )
     parser.add_argument(
-        "--retry-delay", type=float, default=1.0, metavar="SECONDS",
-        help="Seconds to wait between retries",
+        "--retry-delay", type=float, default=5.0, metavar="SECONDS",
+        help="Delay between retries in seconds",
     )
     parser.add_argument(
-        "--job-name", default=None,
-        help="Human-readable job name used in logs",
+        "--log-file", default=None, metavar="PATH",
+        help="Path to log file (defaults to stderr)",
+    )
+    parser.add_argument(
+        "--lock", action="store_true",
+        help="Prevent overlapping executions using a lock file",
+    )
+    parser.add_argument(
+        "--lock-dir", default="/tmp/cronwrap/locks", metavar="DIR",
+        help="Directory for lock files (default: /tmp/cronwrap/locks)",
+    )
+    parser.add_argument(
+        "--stale-lock-after", type=int, default=3600, metavar="SECONDS",
+        help="Consider lock stale after SECONDS (default: 3600)",
     )
     return parser
 
 
-def main(argv: Optional[List[str]] = None) -> int:
+def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
 
-    command = args.command
-    # argparse REMAINDER may include a leading '--'
-    if command and command[0] == "--":
-        command = command[1:]
+    if not args.command:
+        parser.error("A command to execute is required.")
 
-    if not command:
-        parser.error("No command specified.")
+    if args.lock:
+        lock_cfg = LockConfig(
+            lock_dir=args.lock_dir,
+            stale_after_seconds=args.stale_lock_after,
+        )
+        lock = JobLock(args.job_name, lock_cfg)
+        try:
+            lock.acquire()
+        except LockAcquisitionError as exc:
+            print(f"cronwrap: {exc}", file=sys.stderr)
+            return 1
+    else:
+        lock = None
 
-    job_name = args.job_name or command[0]
+    try:
+        from cronwrap.core import CronJob
+        from cronwrap.retry import RetryPolicy
+        from cronwrap.timeout import TimeoutConfig
 
-    timeout_cfg = TimeoutConfig(seconds=args.timeout)
-    retry_policy = RetryPolicy(
-        max_attempts=args.retries + 1,
-        delay=args.retry_delay,
-    )
+        timeout_cfg = TimeoutConfig(seconds=args.timeout)
+        retry_policy = RetryPolicy(
+            max_attempts=args.retries + 1,
+            delay=args.retry_delay,
+        )
+        job = CronJob(
+            name=args.job_name,
+            command=args.command,
+            timeout=timeout_cfg,
+            retry_policy=retry_policy,
+        )
+        result = job.run()
+        return 0 if result.succeeded else 1
+    finally:
+        if lock is not None:
+            lock.release()
 
-    job = CronJob(
-        name=job_name,
-        command=command,
-        timeout=timeout_cfg,
-        retry_policy=retry_policy,
-    )
 
-    result = job.run()
-    print(result.summary())
-    return result.exit_code if result.exit_code is not None else 1
-
-
-if __name__ == "__main__":  # pragma: no cover
+if __name__ == "__main__":
     sys.exit(main())
