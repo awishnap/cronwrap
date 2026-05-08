@@ -1,71 +1,67 @@
-"""Pre/post execution hooks for cron jobs."""
+"""Hook support — run callables or shell commands before/after a cron job."""
 from __future__ import annotations
 
-import logging
+import subprocess
 from dataclasses import dataclass, field
-from typing import Callable, Optional
-
-log = logging.getLogger(__name__)
-
-HookFn = Callable[[str, dict], None]
+from typing import Callable, List, Optional
 
 
 @dataclass
 class HookConfig:
-    pre_run: list[HookFn] = field(default_factory=list)
-    post_run: list[HookFn] = field(default_factory=list)
-    on_failure: list[HookFn] = field(default_factory=list)
-    stop_on_pre_error: bool = False
+    """Defines pre/post hook commands or callables for a job."""
+
+    pre_hooks: List[str] = field(default_factory=list)
+    post_hooks: List[str] = field(default_factory=list)
+    timeout_seconds: int = 30
+    stop_on_failure: bool = True
+
+    def __post_init__(self) -> None:
+        if self.timeout_seconds <= 0:
+            raise ValueError(
+                f"timeout_seconds must be > 0, got {self.timeout_seconds}"
+            )
 
 
 class HookError(Exception):
-    def __init__(self, hook_name: str, cause: Exception) -> None:
-        super().__init__(f"Hook '{hook_name}' raised: {cause}")
-        self.hook_name = hook_name
-        self.cause = cause
+    """Raised when a hook command fails and stop_on_failure is True."""
+
+    def __init__(self, hook: str, returncode: int) -> None:
+        self.hook = hook
+        self.returncode = returncode
+        super().__init__(f"Hook '{hook}' failed with exit code {returncode}")
 
 
 class HookRunner:
-    """Invokes registered hooks around job execution."""
+    """Executes shell-command hooks in order."""
 
-    def __init__(self, job_name: str, config: HookConfig) -> None:
-        self.job_name = job_name
+    def __init__(self, config: HookConfig) -> None:
         self.config = config
 
-    def _run_hooks(self, hooks: list[HookFn], context: dict, *, stop_on_error: bool = False) -> None:
+    def run_pre(self) -> List[int]:
+        """Run all pre-hooks; return list of exit codes."""
+        return self._run_hooks(self.config.pre_hooks)
+
+    def run_post(self) -> List[int]:
+        """Run all post-hooks; return list of exit codes."""
+        return self._run_hooks(self.config.post_hooks)
+
+    def _run_hooks(self, hooks: List[str]) -> List[int]:
+        results: List[int] = []
         for hook in hooks:
-            name = getattr(hook, "__name__", repr(hook))
-            try:
-                hook(self.job_name, context)
-            except Exception as exc:  # noqa: BLE001
-                log.warning("Hook '%s' failed: %s", name, exc)
-                if stop_on_error:
-                    raise HookError(name, exc) from exc
+            code = self._execute(hook)
+            results.append(code)
+            if code != 0 and self.config.stop_on_failure:
+                raise HookError(hook, code)
+        return results
 
-    def run_pre(self, context: Optional[dict] = None) -> None:
-        self._run_hooks(
-            self.config.pre_run,
-            context or {},
-            stop_on_error=self.config.stop_on_pre_error,
-        )
-
-    def run_post(self, context: Optional[dict] = None) -> None:
-        self._run_hooks(self.config.post_run, context or {})
-
-    def run_on_failure(self, context: Optional[dict] = None) -> None:
-        self._run_hooks(self.config.on_failure, context or {})
-
-    def run_all(
-        self,
-        execute_fn: Callable[[], None],
-        context: Optional[dict] = None,
-    ) -> None:
-        ctx = context or {}
-        self.run_pre(ctx)
+    def _execute(self, command: str) -> int:
         try:
-            execute_fn()
-        except Exception:
-            self.run_on_failure(ctx)
-            raise
-        finally:
-            self.run_post(ctx)
+            result = subprocess.run(
+                command,
+                shell=True,
+                timeout=self.config.timeout_seconds,
+                capture_output=True,
+            )
+            return result.returncode
+        except subprocess.TimeoutExpired:
+            return 124  # standard timeout exit code
