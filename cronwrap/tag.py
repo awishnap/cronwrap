@@ -56,3 +56,12 @@ class TagManager:
     def all_jobs(self) -> List[str]:
         """Return all registered job names."""
         return list(self._registry.keys())
+
+    def unregister(self, job_name: str) -> None:
+        """Remove a job and its tags from the registry.
+
+        Raises TagValidationError if the job is not registered.
+        """
+        if job_name not in self._registry:
+            raise TagValidationError(f"Job '{job_name}' is not registered.")
+        del self._registry[job_name]
