@@ -44,6 +44,28 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _acquire_lock(args: argparse.Namespace) -> JobLock | None:
+    """Acquire a job lock if --lock was requested.
+
+    Returns the acquired JobLock, or None if locking is disabled.
+    Prints an error and raises SystemExit with code 1 on failure.
+    """
+    if not args.lock:
+        return None
+
+    lock_cfg = LockConfig(
+        lock_dir=args.lock_dir,
+        stale_after_seconds=args.stale_lock_after,
+    )
+    lock = JobLock(args.job_name, lock_cfg)
+    try:
+        lock.acquire()
+    except LockAcquisitionError as exc:
+        print(f"cronwrap: {exc}", file=sys.stderr)
+        raise SystemExit(1) from exc
+    return lock
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
@@ -51,19 +73,7 @@ def main(argv: list[str] | None = None) -> int:
     if not args.command:
         parser.error("A command to execute is required.")
 
-    if args.lock:
-        lock_cfg = LockConfig(
-            lock_dir=args.lock_dir,
-            stale_after_seconds=args.stale_lock_after,
-        )
-        lock = JobLock(args.job_name, lock_cfg)
-        try:
-            lock.acquire()
-        except LockAcquisitionError as exc:
-            print(f"cronwrap: {exc}", file=sys.stderr)
-            return 1
-    else:
-        lock = None
+    lock = _acquire_lock(args)
 
     try:
         from cronwrap.core import CronJob
