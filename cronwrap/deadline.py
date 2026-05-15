@@ -76,6 +76,15 @@ class DeadlineTracker:
                     datetime.now(timezone.utc),
                 )
 
+    def reset(self) -> None:
+        """Reset the tracker to its initial state, clearing start time and breach flag.
+
+        Useful when re-running a job under the same tracker instance without
+        creating a new one (e.g. in test harnesses or job schedulers).
+        """
+        self._start = None
+        self.breached = False
+
     def __repr__(self) -> str:  # pragma: no cover
         return (
             f"DeadlineTracker(job={self._job_name!r}, "
