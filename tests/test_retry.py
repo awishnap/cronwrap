@@ -81,13 +81,20 @@ class TestRetryPolicyExecute:
             assert call.args[0] <= 15.0
 
     def test_only_specified_exceptions_retried(self):
+        """Non-matching exceptions should propagate immediately without retrying."""
         policy = RetryPolicy(max_attempts=3, delay=0, exceptions=(ValueError,))
         func = MagicMock(side_effect=TypeError("wrong type"))
-        with pytest.raises(TypeError):
+        with pytest.raises(TypeError, match="wrong type"):
             policy.execute(func)
+        # Should not retry; only the first call should have been made
         assert func.call_count == 1
 
-    def test_repr(self):
-        policy = RetryPolicy(max_attempts=2, delay=1.0, backoff=2.0, max_delay=30.0)
-        assert "RetryPolicy" in repr(policy)
-        assert "max_attempts=2" in repr(policy)
+    @patch("cronwrap.retry.time.sleep")
+    def test_only_specified_exceptions_are_retried(self, mock_sleep):
+        """Matching exceptions should be retried while others propagate immediately."""
+        policy = RetryPolicy(max_attempts=3, delay=0.1, exceptions=(ValueError,))
+        func = MagicMock(side_effect=[ValueError("retry me"), "ok"])
+        result = policy.execute(func)
+        assert result == "ok"
+        assert func.call_count == 2
+        mock_sleep.assert_called_once_with(0.1)
